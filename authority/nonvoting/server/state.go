@@ -193,11 +193,11 @@ func (s *state) generateDocument(epoch uint64) {
 	s.log.Noticef("Generating Document for epoch %v.", epoch)
 
 	// Carve out the descriptors between providers and nodes.
-	var providers [][]byte
+	var providers []*pki.MixDescriptor
 	var nodes []*descriptor
 	for _, v := range s.descriptors[epoch] {
 		if v.desc.Layer == pki.LayerProvider {
-			providers = append(providers, v.raw)
+			providers = append(providers, v.desc)
 		} else {
 			nodes = append(nodes, v)
 		}
@@ -319,13 +319,13 @@ func (s *state) generateDocument(epoch uint64) {
 	s.documents[epoch] = d
 }
 
-func (s *state) generateTopology(nodeList []*pki.MixDescriptor, doc *pki.Document) [][]*pki.MixDescriptor {
+func (s *state) generateTopology(nodeList []*descriptor, doc *pki.Document) [][]*pki.MixDescriptor {
 	s.log.Debugf("Generating mix topology.")
 
 	nodeMap := make(map[[constants.NodeIDLength]byte]*pki.MixDescriptor)
 	for _, v := range nodeList {
-		id := v.IdentityKey.Sum256()
-		nodeMap[id] = v
+		id := v.desc.IdentityKey.Sum256()
+		nodeMap[id] = v.desc
 	}
 
 	// Since there is an existing network topology, use that as the basis for
@@ -387,7 +387,7 @@ func (s *state) generateTopology(nodeList []*pki.MixDescriptor, doc *pki.Documen
 	return topology
 }
 
-func (s *state) generateRandomTopology(nodes []*pki.MixDescriptor) [][]*pki.MixDescriptor {
+func (s *state) generateRandomTopology(nodes []*descriptor) [][]*pki.MixDescriptor {
 	s.log.Debugf("Generating random mix topology.")
 
 	// If there is no node history in the form of a previous consensus,
@@ -399,7 +399,7 @@ func (s *state) generateRandomTopology(nodes []*pki.MixDescriptor) [][]*pki.MixD
 	topology := make([][]*pki.MixDescriptor, s.s.cfg.Debug.Layers)
 	for idx, layer := 0, 0; idx < len(nodes); idx++ {
 		n := nodes[nodeIndexes[idx]]
-		topology[layer] = append(topology[layer], n)
+		topology[layer] = append(topology[layer], n.desc)
 		layer++
 		layer = layer % len(topology)
 	}

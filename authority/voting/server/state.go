@@ -270,7 +270,12 @@ func (s *state) consense(epoch uint64) *document {
 
 	for pk, c := range certificates {
 		// XXX: validate a signature over the commit
-		for pk2, b := range c.SharedRandomCommit {
+		doc := new(pki.Document)
+		err := doc.UnmarshalBinary(c)
+		if err != nil {
+			panic(err)
+		}
+		for pk2, b := range doc.SharedRandomCommit {
 			if b2, ok := commits[pk2]; ok {
 				// compare every vote to see if any entries are different
 				if !bytes.Equal(b2, b) {
@@ -321,7 +326,7 @@ func (s *state) consense(epoch uint64) *document {
 				id := base64.StdEncoding.EncodeToString(bs[:])
 				s.log.Errorf("VerifyThreshold returned bad Verifiers: %s\n", id)
 			}
-			if pDoc, err := s11n.VerifyAndParseDocument(certificate1, good[0]); err == nil {
+			if pDoc, err := pki.VerifyAndParseDocument(certificate1, good[0]); err == nil {
 
 				// Persist the document to disk.
 				s.persistDocument(epoch, []byte(certificate1))
@@ -368,20 +373,20 @@ func (s *state) voted(epoch uint64) bool {
 	return false
 }
 
-func (s *state) getDocument(descriptors []*descriptor, params *config.Parameters, srv []byte) *s11n.Document {
+func (s *state) getDocument(descriptors []*descriptor, params *config.Parameters, srv []byte) *pki.Document {
 	// Carve out the descriptors between providers and nodes.
-	var providers [][]byte
+	var providers []*pki.MixDescriptor
 	var nodes []*descriptor
 	for _, v := range descriptors {
 		if v.desc.Layer == pki.LayerProvider {
-			providers = append(providers, v.raw)
+			providers = append(providers, v.desc)
 		} else {
 			nodes = append(nodes, v)
 		}
 	}
 
 	// Assign nodes to layers.
-	var topology [][][]byte
+	var topology [][]*pki.MixDescriptor
 
 	// if a static topology is specified, generate a fixed topology
 	if s.s.cfg.Topology != nil {
@@ -540,13 +545,14 @@ func (s *state) vote(epoch uint64) (*document, error) {
 		return nil, err
 	}
 
+	d := &document{raw: signedVote, doc: vote}
 	s.log.Debugf("Ready to send our vote:\n%s", vote)
 	// save our own vote
 	if _, ok := s.votes[epoch]; !ok {
 		s.votes[epoch] = make(map[[publicKeyHashSize]byte]*document)
 	}
 	if _, ok := s.votes[epoch][s.identityPubKeyHash()]; !ok {
-		s.votes[epoch][s.identityPubKeyHash()] = signedVote
+		s.votes[epoch][s.identityPubKeyHash()] = d
 		// XXX persist votes to database?
 	} else {
 		s.log.Errorf("failure: vote already present, this should never happen.")
@@ -554,12 +560,12 @@ func (s *state) vote(epoch uint64) (*document, error) {
 		s.s.fatalErrCh <- err
 		return nil, err
 	}
-	return signedVote, nil
+	return d, nil
 }
 
-func (s *state) sign(doc *s11n.Document) *document {
+func (s *state) sign(doc *pki.Document) *document {
 	// Serialize and sign the Document.
-	signed, err := s11n.SignDocument(s.s.identityPrivateKey, s.s.identityPublicKey, doc)
+	signed, err := pki.SignDocument(s.s.identityPrivateKey, s.s.identityPublicKey, doc)
 	if err != nil {
 		// This should basically always succeed.
 		s.log.Errorf("Failed to sign document: %v", err)
@@ -568,7 +574,7 @@ func (s *state) sign(doc *s11n.Document) *document {
 	}
 
 	// Ensure the document is sane.
-	pDoc, err := s11n.VerifyAndParseDocument([]byte(signed), s.s.identityPublicKey)
+	pDoc, err := pki.VerifyAndParseDocument([]byte(signed), s.s.identityPublicKey)
 	if err != nil {
 		// This should basically always succeed.
 		s.log.Errorf("Signed document failed validation: %v", err)
@@ -791,7 +797,12 @@ func (s *state) tallyVotes(epoch uint64) ([]*descriptor, *config.Parameters, err
 
 		// Epoch is already verified to match the SharedRandomCommit
 		// Verify that the voting peer has participated in commit-and-reveal this epoch.
-		srv.SetCommit(voteDoc.doc.SharedRandomCommit)
+		src, ok := voteDoc.doc.SharedRandomCommit[idHash]
+		if !ok {
+			s.log.Errorf("Skipping vote from Authority %v with missing SharedRandomCommit", idHash)
+			continue
+		}
+		srv.SetCommit(src)
 		r := s.reveals[epoch][idHash]
 		if len(r) != pki.SharedRandomLength {
 			s.log.Errorf("Skipping vote from Authority %v with incorrect Reveal length %d :%v", idHash, len(r), r)
@@ -840,7 +851,12 @@ func (s *state) tallyVotes(epoch uint64) ([]*descriptor, *config.Parameters, err
 		mixParams[bs] = append(mixParams[bs], vote)
 
 		// include providers in the tally.
-		for _, rawDesc := range vote.Providers {
+		for _, desc := range vote.Providers {
+			rawDesc, err := desc.MarshalBinary()
+			if err != nil {
+				s.log.Errorf("Skipping vote from Authority whose MixDescriptor failed to encode?! %v", err)
+				continue
+			}
 			k := string(rawDesc)
 			if _, ok := mixTally[k]; !ok {
 				mixTally[k] = make([]*pki.Document, 0)
@@ -849,7 +865,13 @@ func (s *state) tallyVotes(epoch uint64) ([]*descriptor, *config.Parameters, err
 		}
 		// include the rest of the mixes in the tally.
 		for _, l := range vote.Topology {
-			for _, rawDesc := range l {
+			for _, desc := range l {
+				rawDesc, err := desc.MarshalBinary()
+				if err != nil {
+					s.log.Errorf("Skipping vote from Authority whose MixDescriptor failed to encode?! %v", err)
+					continue
+				}
+
 				k := string(rawDesc)
 				if _, ok := mixTally[k]; !ok {
 					mixTally[k] = make([]*pki.Document, 0)
@@ -863,14 +885,15 @@ func (s *state) tallyVotes(epoch uint64) ([]*descriptor, *config.Parameters, err
 		if len(votes) >= s.threshold {
 			// this shouldn't fail as the descriptors have already been verified
 			desc := new(pki.MixDescriptor)
-			err := desc.UnmarshalBinary(rawDesc)
+			err := desc.UnmarshalBinary([]byte(rawDesc))
 			if err != nil {
 				return nil, nil, err
 			}
+			d := &descriptor{raw: []byte(rawDesc), desc: desc}
 
 			// only add nodes we have authorized
 			if s.isDescriptorAuthorized(desc) {
-				nodes = append(nodes, desc)
+				nodes = append(nodes, d)
 			}
 		}
 	}
@@ -920,7 +943,12 @@ func (s *state) computeSharedRandom(epoch uint64) ([]byte, error) {
 			// skip this vote, authority did not reveal
 			continue
 		}
-		sr.SetCommit(vote.doc.SharedRandomCommit)
+		src, ok := vote.doc.SharedRandomCommit[pk]
+		if !ok {
+			s.s.log.Errorf("authority: No SharedRandomCommit present, cannot calculate a shared random for Epoch %x", pk)
+			continue
+		}
+		sr.SetCommit(src)
 		srr := s.reveals[epoch][pk]
 		if sr.Verify(srr) {
 			reveals = append(reveals, Reveal{pk, srr})
@@ -995,7 +1023,7 @@ func (s *state) tabulate(epoch uint64) ([]byte, error) {
 	if raw, err := cert.GetCertified(signed); err == nil {
 
 		// we need to do this because our stupid duplication of formats everywhere
-		ourvote, err := s11n.VerifyAndParseDocument(signed, s.verifiers[s.s.identityPublicKey.Sum256()])
+		ourvote, err := pki.VerifyAndParseDocument(signed, s.verifiers[s.s.identityPublicKey.Sum256()])
 		if err != nil {
 			panic(err)
 		}
@@ -1030,7 +1058,7 @@ func (s *state) generateTopology(nodeList []*descriptor, doc *pki.Document, srv 
 		s.s.fatalErrCh <- err
 	}
 	targetNodesPerLayer := len(nodeList) / s.s.cfg.Debug.Layers
-	topology := make([][][]byte, s.s.cfg.Debug.Layers)
+	topology := make([][]*pki.MixDescriptor, s.s.cfg.Debug.Layers)
 
 	// Assign nodes that still exist up to the target size.
 	for layer, nodes := range doc.Topology {
@@ -1046,7 +1074,7 @@ func (s *state) generateTopology(nodeList []*descriptor, doc *pki.Document, srv 
 				// There is a new descriptor with the same identity key,
 				// as an existing descriptor in the previous document,
 				// so preserve the layering.
-				topology[layer] = append(topology[layer], n.raw)
+				topology[layer] = append(topology[layer], n.desc)
 				delete(nodeMap, id)
 			}
 		}
@@ -1065,7 +1093,7 @@ func (s *state) generateTopology(nodeList []*descriptor, doc *pki.Document, srv 
 	for layer := range doc.Topology {
 		for len(topology[layer]) < targetNodesPerLayer {
 			n := toAssign[assignIndexes[idx]]
-			topology[layer] = append(topology[layer], n.raw)
+			topology[layer] = append(topology[layer], n.desc)
 			idx++
 		}
 	}
@@ -1073,7 +1101,7 @@ func (s *state) generateTopology(nodeList []*descriptor, doc *pki.Document, srv 
 	// Assign the remaining nodes.
 	for layer := 0; idx < len(assignIndexes); idx++ {
 		n := toAssign[assignIndexes[idx]]
-		topology[layer] = append(topology[layer], n.raw)
+		topology[layer] = append(topology[layer], n.desc)
 		layer++
 		layer = layer % len(topology)
 	}
@@ -1089,11 +1117,11 @@ func (s *state) generateFixedTopology(nodes []*descriptor, srv []byte) [][]*pki.
 	// collect all of the identity keys from the current set of descriptors
 	for _, v := range nodes {
 		id := v.desc.IdentityKey.Sum256()
-		nodeMap[id] = v
+		nodeMap[id] = v.desc
 	}
 
 	// range over the keys in the configuration file and collect the descriptors for each layer
-	topology := make([][][]byte, len(s.s.cfg.Topology.Layers))
+	topology := make([][]*pki.MixDescriptor, len(s.s.cfg.Topology.Layers))
 	for strata, layer := range s.s.cfg.Topology.Layers {
 		for _, node := range layer.Nodes {
 			_, identityKey := cert.Scheme.NewKeypair()
@@ -1105,14 +1133,14 @@ func (s *state) generateFixedTopology(nodes []*descriptor, srv []byte) [][]*pki.
 
 			// if the listed node is in the current descriptor set, place it in the layer
 			if n, ok := nodeMap[id]; ok {
-				topology[strata] = append(topology[strata], n.raw)
+				topology[strata] = append(topology[strata], n)
 			}
 		}
 	}
 	return topology
 }
 
-func (s *state) generateRandomTopology(nodes []*pki.MixDescriptor, srv []byte) [][]*pki.MixDescriptor{
+func (s *state) generateRandomTopology(nodes []*descriptor, srv []byte) [][]*pki.MixDescriptor{
 	s.log.Debugf("Generating random mix topology.")
 
 	// If there is no node history in the form of a previous consensus,
@@ -1131,10 +1159,10 @@ func (s *state) generateRandomTopology(nodes []*pki.MixDescriptor, srv []byte) [
 	}
 
 	nodeIndexes := rng.Perm(len(nodes))
-	topology := make([][][]byte, s.s.cfg.Debug.Layers)
+	topology := make([][]*pki.MixDescriptor, s.s.cfg.Debug.Layers)
 	for idx, layer := 0, 0; idx < len(nodes); idx++ {
 		n := nodes[nodeIndexes[idx]]
-		topology[layer] = append(topology[layer], n.raw)
+		topology[layer] = append(topology[layer], n.desc)
 		layer++
 		layer = layer % len(topology)
 	}
@@ -1410,7 +1438,7 @@ func (s *state) documentForEpoch(epoch uint64) ([]byte, error) {
 
 	// If we have a serialized document, return it.
 	if d, ok := s.documents[epoch]; ok {
-		return d.MarshalBinary()
+		return d.raw, nil
 	}
 
 	// Otherwise, return an error based on the time.
@@ -1508,11 +1536,8 @@ func (s *state) restorePersistence() error {
 					if len(wantHash) != publicKeyHashSize {
 						panic("stored hash should be 32 bytes")
 					}
-					verifier, err := pki.GetVerifierFromDescriptor([]byte(rawDesc))
-					if err != nil {
-						return err
-					}
-					desc, err := pki.VerifyAndParseDescriptor(verifier, rawDesc, epoch)
+					desc := new(pki.MixDescriptor)
+					err := desc.UnmarshalBinary(rawDesc)
 					if err != nil {
 						s.log.Errorf("Failed to validate persisted descriptor: %v", err)
 						continue
@@ -1741,7 +1766,7 @@ func sha256b64(raw []byte) string {
 }
 
 // validate the topology
-func (s *state) verifyTopology(topology [][][]byte) error {
+func (s *state) verifyTopology(topology [][]*pki.MixDescriptor) error {
 	if len(topology) < s.s.cfg.Debug.Layers {
 		return errInvalidTopology
 	}

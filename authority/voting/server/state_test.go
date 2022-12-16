@@ -236,6 +236,7 @@ func TestVote(t *testing.T) {
 
 		desc := &pki.MixDescriptor{
 			Name:        mixCfgs[i].Server.Identifier,
+			Epoch:       votingEpoch,
 			IdentityKey: idKeys[i].pubKey,
 			LinkKey:     linkKey.PublicKey(),
 			MixKeys:     mkeys,
