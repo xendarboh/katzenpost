@@ -31,7 +31,6 @@ import (
 	"github.com/ugorji/go/codec"
 	"gopkg.in/op/go-logging.v1"
 
-	"github.com/katzenpost/katzenpost/authority/internal/s11n"
 	"github.com/katzenpost/katzenpost/authority/voting/server/config"
 	"github.com/katzenpost/katzenpost/core/crypto/cert"
 	"github.com/katzenpost/katzenpost/core/crypto/ecdh"
@@ -176,7 +175,7 @@ func generateNodes(isProvider bool, num int, epoch uint64) ([]*descriptor, error
 			Layer:      layer,
 			LoadWeight: 0,
 		}
-		signed, err := s11n.SignDescriptor(mixIdentityPrivateKey, mixIdentityPublicKey, mix)
+		signed, err := pki.SignDescriptor(mixIdentityPrivateKey, mixIdentityPublicKey, mix)
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +188,7 @@ func generateNodes(isProvider bool, num int, epoch uint64) ([]*descriptor, error
 	return mixes, nil
 }
 
-func generateMixnet(numMixes, numProviders int, epoch uint64) (*s11n.Document, error) {
+func generateMixnet(numMixes, numProviders int, epoch uint64) (*pki.Document, error) {
 	mixes, err := generateNodes(false, numMixes, epoch)
 	if err != nil {
 		return nil, err
@@ -204,10 +203,10 @@ func generateMixnet(numMixes, numProviders int, epoch uint64) (*s11n.Document, e
 	}
 	topology := generateRandomTopology(mixes, 3)
 
-	sharedRandomCommit := make([]byte, s11n.SharedRandomLength)
+	sharedRandomCommit := make([]byte, pki.SharedRandomLength)
 	binary.BigEndian.PutUint64(sharedRandomCommit[:8], epoch)
-	doc := &s11n.Document{
-		Version:            s11n.DocumentVersion,
+	doc := &pki.Document{
+		Version:            pki.DocumentVersion,
 		Epoch:              epoch,
 		GenesisEpoch:       epoch,
 		Mu:                 0.25,
@@ -217,19 +216,19 @@ func generateMixnet(numMixes, numProviders int, epoch uint64) (*s11n.Document, e
 		Topology:           topology,
 		Providers:          providersRaw,
 		SharedRandomCommit: sharedRandomCommit,
-		SharedRandomValue:  make([]byte, s11n.SharedRandomValueLength),
+		SharedRandomValue:  make([]byte, pki.SharedRandomValueLength),
 	}
 	return doc, nil
 }
 
 // multiSignTestDocument signs and serializes the document with the provided signing key.
-func multiSignTestDocument(signingKeys []sign.PrivateKey, signingPubKeys []sign.PublicKey, d *s11n.Document) ([]byte, error) {
+func multiSignTestDocument(signingKeys []sign.PrivateKey, signingPubKeys []sign.PublicKey, d *pki.Document) ([]byte, error) {
 	jsonHandle := new(codec.JsonHandle)
 	jsonHandle.Canonical = true
 	jsonHandle.IntegerAsString = 'A'
 	jsonHandle.MapKeyAsString = true
 
-	d.Version = s11n.DocumentVersion
+	d.Version = pki.DocumentVersion
 	// Serialize the document.
 	var payload []byte
 	enc := codec.NewEncoderBytes(&payload, jsonHandle)
