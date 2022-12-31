@@ -29,40 +29,14 @@ import (
 	"github.com/katzenpost/katzenpost/core/crypto/rand"
 )
 
-var basePayload = []byte(`Data encryption is used widely to protect the content of Internet
-communications and enables the myriad of activities that are popular today,
-from online banking to chatting with loved ones. However, encryption is not
-sufficient to protect the meta-data associated with the communications.
-
-Modern encrypted communication networks are vulnerable to traffic analysis and
-can leak such meta-data as the social graph of users, their geographical
-location, the timing of messages and their order, message size, and many other
-kinds of meta-data.
-
-Since 1979, there has been active academic research into communication
-meta-data protection, also called anonymous communication networking, that has
-produced various designs. Of these, mix networks are among the most practical
-and can readily scale to millions of users.
-`)
-
-func sendPing(session *client.Session, serviceDesc *utils.ServiceDescriptor, printDiff bool) bool {
-	var nonce [32]byte
-
-	_, err := rand.Reader.Read(nonce[:])
-
+func sendPing(geo *sphinx.Geometry, session *client.Session, serviceDesc *utils.ServiceDescriptor, printDiff bool) bool {
+	msg := make([]byte, geo.ForwardPayloadLen)
+	_, err := rand.Reader.Read(pingPayload)
 	if err != nil {
 		panic(err)
 	}
 
-	pingPayload := append(nonce[:], basePayload...)
-
-	cborPayload, err := cbor.Marshal(pingPayload)
-	if err != nil {
-		fmt.Printf("Failed to marshal: %v\n", err)
-		panic(err)
-	}
-
-	reply, err := session.BlockingSendUnreliableMessage(serviceDesc.Name, serviceDesc.Provider, cborPayload)
+	reply, err := session.BlockingSendUnreliableMessage(serviceDesc.Name, serviceDesc.Provider, msg)
 
 	if err != nil {
 		fmt.Printf("\nerror: %v\n", err)
@@ -70,28 +44,20 @@ func sendPing(session *client.Session, serviceDesc *utils.ServiceDescriptor, pri
 		return false
 	}
 
-	var replyPayload []byte
-
-	err = cbor.Unmarshal(reply, &replyPayload)
-	if err != nil {
-		fmt.Printf("Failed to unmarshal: %s\n", err)
-		panic(err)
-	}
-
-	if bytes.Equal(replyPayload, pingPayload) {
+	if bytes.Equal(reply, msg) {
 		// OK, received identical payload in reply.
 		return true
 	} else {
 		// Fail, received unexpected payload in reply.
 
 		if printDiff {
-			fmt.Printf("\nReply payload: %x\nOriginal payload: %x\n", replyPayload, pingPayload)
+			fmt.Printf("\nReply payload: %x\nOriginal payload: %x\n", reply, msg)
 		}
 		return false
 	}
 }
 
-func sendPings(session *client.Session, serviceDesc *utils.ServiceDescriptor, count int, concurrency int, printDiff bool) {
+func sendPings(geo *sphinx.Geometry, session *client.Session, serviceDesc *utils.ServiceDescriptor, count int, concurrency int, printDiff bool) {
 	if concurrency > constants.MaxEgressQueueSize {
 		fmt.Printf("error: concurrency cannot be greater than MaxEgressQueueSize (%d)\n", constants.MaxEgressQueueSize)
 		return
@@ -111,7 +77,7 @@ func sendPings(session *client.Session, serviceDesc *utils.ServiceDescriptor, co
 
 		// make new goroutine for each ping to send them in parallel
 		go func() {
-			if sendPing(session, serviceDesc, printDiff) {
+			if sendPing(geo, session, serviceDesc, printDiff) {
 				fmt.Printf("!")
 				atomic.AddUint64(&passed, 1)
 			} else {
