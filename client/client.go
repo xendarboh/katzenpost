@@ -182,11 +182,12 @@ func (c *Client) NewTOFUSession() (*Session, error) {
 	if _, doc, err = PKIBootstrap(c.cfg, linkKey); err != nil {
 		return nil, err
 	}
+
 	// choose a provider
 	if provider, err = SelectProvider(doc); err != nil {
 		return nil, err
 	}
 
-	c.session, err = NewSession(ctx, c.fatalErrCh, c.logBackend, c.cfg, linkKey, provider)
+	c.session, err = NewSession(doc.Geometry, ctx, c.fatalErrCh, c.logBackend, c.cfg, linkKey, provider)
 	return c.session, err
 }

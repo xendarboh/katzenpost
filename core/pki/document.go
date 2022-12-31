@@ -81,6 +81,9 @@ type Document struct {
 	// GenesisEpoch is the epoch on which authorities started consensus
 	GenesisEpoch uint64
 
+	// Geometry describes the geometry of a Sphinx packet.
+	Geometry sphinx.Geometry
+
 	// SendRatePerMinute is the number of packets per minute a client can send.
 	SendRatePerMinute uint64
 
