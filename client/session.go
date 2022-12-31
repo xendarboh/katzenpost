@@ -78,6 +78,7 @@ type Session struct {
 // New establishes a session with provider using key.
 // This method will block until session is connected to the Provider.
 func NewSession(
+	geo *sphinx.Geometry,
 	ctx context.Context,
 	fatalErrCh chan error,
 	logBackend *log.Backend,
@@ -103,8 +104,11 @@ func NewSession(
 
 	clientLog := logBackend.GetLogger(fmt.Sprintf("%s_client", provider.Name))
 
+	if geo == nil {
+		geo = sphinx.DefaultGeometry()
+	}
 	s := &Session{
-		geo:         sphinx.DefaultGeometry(),
+		geo:         geo,
 		sphinx:      sphinx.DefaultSphinx(),
 		cfg:         cfg,
 		linkKey:     linkKey,
