@@ -209,10 +209,10 @@ func (s *state) fsm() <-chan time.Time {
 			if err == nil {
 				s.sendCertToAuthorities(serialized, s.votingEpoch)
 			} else {
-				s.log.Errorf("Failed to serialize certificate for epoch %v", s.votingEpoch)
+				s.log.Errorf("Failed to serialize certificate for epoch %v: %s", s.votingEpoch, err)
 			}
 		} else {
-			s.log.Errorf("Failed to compute certificate for epoch %v", s.votingEpoch)
+			s.log.Errorf("Failed to compute certificate for epoch %v: %s", s.votingEpoch, err)
 		}
 		s.state = stateAcceptCert
 		sleep = AuthorityCertDeadline - elapsed
