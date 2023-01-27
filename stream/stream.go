@@ -16,6 +16,8 @@ import (
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/nacl/secretbox"
 	"io"
+	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -136,15 +138,21 @@ type Stream struct {
 	// RState indicates Writer State
 	WState StreamState
 
+	// Deadlines set by SetDeadline, SetReadDeadline, SetWriteDeadline
+	readDeadline, writeDeadline time.Time
+
+	laddr, raddr *StreamAddr
+
 	// timeout value used internally before failing a blocking call
 	defaultTimeout time.Duration
 
 	// onFlush signals writer worker to wake and transmit frames
-	onFlush       chan struct{}
-	onAck         chan struct{}
-	onWrite       chan struct{}
-	onRead        chan struct{}
-	onStreamClose chan struct{}
+	onFlush          chan struct{}
+	onAck            chan struct{}
+	onWrite          chan struct{}
+	onRead           chan struct{}
+	onStreamClose    chan struct{}
+	onUpdateDeadline chan struct{}
 }
 
 // glue for timerQ
@@ -230,6 +238,12 @@ func (s *Stream) reader() {
 // Read impl io.Reader
 func (s *Stream) Read(p []byte) (n int, err error) {
 	s.Lock()
+	if !s.readDeadline.IsZero() {
+		if time.Now().After(s.readDeadline) {
+			s.Unlock()
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
 	if s.RState == StreamClosed {
 		s.Unlock()
 		return 0, io.EOF
@@ -240,8 +254,14 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 	}
 	if s.readBuf.Len() == 0 {
 		s.Unlock()
+		var timeout time.Duration
+		if !s.readDeadline.IsZero() {
+			timeout = s.readDeadline.Sub(time.Now())
+		} else {
+			timeout = s.defaultTimeout
+		}
 		select {
-		case <-time.After(s.defaultTimeout):
+		case <-time.After(timeout):
 			return 0, io.EOF
 		case <-s.HaltCh():
 			return 0, io.EOF
@@ -270,14 +290,27 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 		s.Unlock()
 		return 0, io.EOF
 	}
+	if !s.writeDeadline.IsZero() {
+		if time.Now().After(s.writeDeadline) {
+			s.Unlock()
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+
 	// take max_writebuf_size as ... a guideline rather than a hard limit
 	// because many users of io.Writer do not seem to handle short writes
 	// properly, so just rate limit calls to write by waiting until
 	// a frame has been transmitted before returning
 	if s.writeBuf.Len() >= s.max_writebuf_size {
 		s.Unlock()
+		var timeout time.Duration
+		if !s.writeDeadline.IsZero() {
+			timeout = s.writeDeadline.Sub(time.Now())
+		} else {
+			timeout = s.defaultTimeout
+		}
 		select {
-		case <-time.After(s.defaultTimeout):
+		case <-time.After(timeout):
 			return 0, io.EOF
 		case <-s.HaltCh():
 			return 0, io.EOF
@@ -287,9 +320,10 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 		}
 		s.Lock()
 	}
-	defer s.doFlush()
-	defer s.Unlock()
-	return s.writeBuf.Write(p)
+	n, err := s.writeBuf.Write(p)
+	s.Unlock()
+	s.doFlush()
+	return n, err
 }
 
 // Close terminates the Stream with a final Frame and blocks future Writes
@@ -303,6 +337,70 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	s.Unlock()
+	return nil
+}
+
+// LocalAddr returns the local network address, if known.
+func (s *Stream) LocalAddr() net.Addr {
+	return s.laddr
+}
+
+// RemoteAddr returns the remote network address, if known.
+func (s *Stream) RemoteAddr() net.Addr {
+	return s.raddr
+}
+
+// SetDeadline sets the read and write deadlines associated
+// with the connection. It is equivalent to calling both
+// SetReadDeadline and SetWriteDeadline.
+//
+// A deadline is an absolute time after which I/O operations
+// fail instead of blocking. The deadline applies to all future
+// and pending I/O, not just the immediately following call to
+// Read or Write. After a deadline has been exceeded, the
+// connection can be refreshed by setting a deadline in the future.
+//
+// If the deadline is exceeded a call to Read or Write or to other
+// I/O methods will return an error that wraps os.ErrDeadlineExceeded.
+// This can be tested using errors.Is(err, os.ErrDeadlineExceeded).
+// The error's Timeout method will return true, but note that there
+// are other possible errors for which the Timeout method will
+// return true even if the deadline has not been exceeded.
+//
+// An idle timeout can be implemented by repeatedly extending
+// the deadline after successful Read or Write calls.
+//
+// A zero value for t means I/O operations will not time out.
+func (s *Stream) SetDeadline(t time.Time) error {
+	s.Lock()
+	s.readDeadline = t
+	s.writeDeadline = t
+	s.Unlock()
+	s.onUpdateDeadline <- struct{}{}
+	return nil
+}
+
+// SetReadDeadline sets the deadline for future Read calls
+// and any currently-blocked Read call.
+// A zero value for t means Read will not time out.
+func (s *Stream) SetReadDeadline(t time.Time) error {
+	s.Lock()
+	s.readDeadline = t
+	s.Unlock()
+	s.onUpdateDeadline <- struct{}{}
+	return nil
+}
+
+// SetWriteDeadline sets the deadline for future Write calls
+// and any currently-blocked Write call.
+// Even if write times out, it may return n > 0, indicating that
+// some of the data was successfully written.
+// A zero value for t means Write will not time out.
+func (s *Stream) SetWriteDeadline(t time.Time) error {
+	s.Lock()
+	s.writeDeadline = t
+	s.Unlock()
+	s.onUpdateDeadline <- struct{}{}
 	return nil
 }
 
@@ -515,6 +613,26 @@ func (s *Stream) exchange(mysecret, othersecret []byte) {
 	if err != nil {
 		panic(err)
 	}
+
+	// obtain LocalAddr and RemoteAddr values
+	addrsalt := []byte("stream_addr_material")
+	laddr_material := hkdf.New(hash, mysecret[:], addrsalt, nil)
+	raddr_material := hkdf.New(hash, othersecret[:], addrsalt, nil)
+	laddr := make([]byte, 32)
+	raddr := make([]byte, 32)
+	_, err = io.ReadFull(laddr_material, laddr)
+	if err != nil {
+		panic(err)
+	}
+	_, err = io.ReadFull(raddr_material, raddr)
+	if err != nil {
+		panic(err)
+	}
+	// set local and remote address to base64 string
+	s.laddr = &StreamAddr{network: "kps"}
+	s.raddr = &StreamAddr{network: "kps"}
+	s.laddr.address = base64.StdEncoding.EncodeToString(laddr)
+	s.raddr.address = base64.StdEncoding.EncodeToString(raddr)
 }
 
 func (s *Stream) doFlush() {
@@ -607,8 +725,8 @@ func NewStream(c *mClient.Client, mysecret, theirsecret []byte) *Stream {
 	s := new(Stream)
 	s.c = c
 	s.Mode = ReliableStream
-
-	// what is a good size to balance message loss vs interactivity
+	s.laddr = &StreamAddr{network: "kps"}
+	s.raddr = &StreamAddr{network: "kps"}
 	s.stream_window_size = 3
 	s.max_writebuf_size = 42 * FramePayloadSize
 	s.RState = StreamOpen
@@ -629,6 +747,7 @@ func NewStream(c *mClient.Client, mysecret, theirsecret []byte) *Stream {
 	s.onStreamClose = make(chan struct{}, 1)
 	s.onWrite = make(chan struct{}, 1)
 	s.onRead = make(chan struct{}, 1)
+	s.onUpdateDeadline = make(chan struct{}, 1)
 	s.Go(s.reader)
 	s.Go(s.writer)
 	return s
