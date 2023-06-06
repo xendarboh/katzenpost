@@ -4,11 +4,13 @@ env:
   CGO_CFLAGS_ALLOW: "-DPARAMS=sphincs-shake-256f"
 jobs:
   test:
+    env:
+      onlyTransports: ${{ matrix.transport }}
     strategy:
       matrix:
         go-version: [1.19.x]
         os: [ubuntu-22.04]
-        transport: [ "", "-onlyTransports tcp", "-onlyTransports quic" ]
+        transport: [ "", "tcp", "quic" ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install Go
@@ -31,12 +33,13 @@ jobs:
   test_e2e_client:
     env:
       warped: true
+      onlyTransports: ${{ matrix.transport }}
       XDG_RUNTIME_DIR: /run
     strategy:
       matrix:
         go-version: [1.19.x]
         os: [ubuntu-22.04]
-        transport: [ "", "-onlyTransports tcp", "-onlyTransports quic" ]
+        transport: [ "", "tcp", "quic" ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -46,12 +49,9 @@ jobs:
         run: |
           sudo systemctl restart dbus && sudo systemctl enable --now podman.socket
 
-      - name: Generate mixnet configuration
-        run: cd genconfig && go build && ./genconfig -v  ${{ matrix.transport }} -b /conf -o ../docker/voting_mixnet/
-
       - name: Build and start the mixnet
         run: |
-          cd docker && sudo -E make start
+          cd docker && sudo -E make clean-local start
 
       - name: Allow mixnet to settle
         run: |
@@ -74,6 +74,7 @@ jobs:
     env:
       warped: true
       XDG_RUNTIME_DIR: /run
+      onlyTransports: ${{ matrix.transport }}
     strategy:
       matrix:
         go-version: [1.19.x]
@@ -89,7 +90,7 @@ jobs:
 
       - name: Build and start the mixnet
         run: |
-          cd docker && sudo -E make start
+          cd docker && sudo -E make clean-local start
 
       - name: Allow mixnet to settle
         run: |
@@ -109,11 +110,12 @@ jobs:
     env:
       warped: true
       XDG_RUNTIME_DIR: /run
+      onlyTransports: ${{ matrix.transport }}
     strategy:
       matrix:
         go-version: [1.19.x]
         os: [ubuntu-22.04]
-        transport: [ "", "-onlyTransports tcp", "-onlyTransports quic" ]
+        transport: [ "", "tcp", "quic" ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -123,12 +125,9 @@ jobs:
         run: |
           sudo systemctl restart dbus && sudo systemctl enable --now podman.socket
 
-      - name: Generate mixnet configuration
-        run: cd genconfig && go build && ./genconfig -v  ${{ matrix.transport }} -b /conf -o ../docker/voting_mixnet/
-
       - name: Build and start the mixnet
         run: |
-          cd docker && sudo -E make start
+          cd docker && sudo -E make clean-local start
 
       - name: Allow mixnet to settle
         run: |
@@ -148,12 +147,12 @@ jobs:
     env:
       warped: true
       XDG_RUNTIME_DIR: /run
+      onlyTransports: ${{ matrix.transport }}
     strategy:
       matrix:
         go-version: [1.19.x]
         os: [ubuntu-22.04]
-        transport: [ "", "-onlyTransports tcp", "-onlyTransports quic" ]
-
+        transport: [ "", "tcp", "quic" ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -163,12 +162,9 @@ jobs:
         run: |
           sudo systemctl restart dbus && sudo systemctl enable --now podman.socket
 
-      - name: Generate mixnet configuration
-        run: cd genconfig && go build && ./genconfig -v  ${{ matrix.transport }} -b /conf -o ../docker/voting_mixnet/
-
       - name: Build and start the mixnet
         run: |
-          cd docker && sudo -E make start
+          cd docker && sudo -E make clean-local start
 
       - name: Allow mixnet to settle
         run: |
